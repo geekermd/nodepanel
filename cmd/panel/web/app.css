@@ -274,3 +274,68 @@ pre.out {
   .sidebar { display: none; }
   .main { padding: 14px; }
 }
+
+/* ---------- 物理地址行 ---------- */
+.net-line {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  font-size: 11.5px; color: var(--text-mute);
+  border-top: 1px dashed var(--line-soft); padding-top: 7px;
+}
+.net-item { font-family: var(--mono); white-space: nowrap; }
+
+/* ---------- 精简版补充样式 ---------- */
+.hint { margin: 12px 0 0; font-size: 11.5px; color: var(--text-mute); }
+.mute { color: var(--text-mute); }
+.xs { font-size: 11px; }
+.sm { font-size: 12px; }
+.ellip { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mono.ellip { max-width: 220px; }
+.scroll-x { overflow-x: auto; }
+
+.card-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; font-weight: 600; color: var(--text-dim);
+  margin: 0 0 10px;
+}
+.card-head a { font-weight: 400; font-size: 12px; }
+.card + .card, .grid + .card, .card + .grid, .grid + .grid, .stat + .card { margin-top: 12px; }
+.page-head + .page-sub { margin: -8px 0 12px; font-size: 11.5px; color: var(--text-mute); }
+.grid.cols-4 + .card, .grid.cols-4 + .grid { margin-top: 12px; }
+
+.table-card { padding: 0; overflow: auto; }
+.table-card .card-head { padding: 12px 14px 0; margin-bottom: 8px; }
+
+.row.meta {
+  font-size: 11.5px; color: var(--text-dim); gap: 6px 14px;
+}
+.row.meta .exp { margin-left: auto; color: var(--text-mute); }
+.row.meta .exp.warn { color: var(--warn); }
+.row.meta .exp.bad { color: var(--bad); }
+.err-line { font-size: 11px; margin-top: 2px; }
+
+.alert {
+  background: rgba(242,178,62,.10); border: 1px solid rgba(242,178,62,.32);
+  border-radius: 9px; padding: 7px 11px; font-size: 12.5px; color: #f6cd86; margin-top: 10px;
+}
+
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button {
+  background: none; border: none; color: var(--text-dim);
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--brand-soft); color: #dce8ff; }
+.seg button:hover { color: var(--text); }
+
+label.field.check { display: flex; gap: 8px; align-items: center; }
+label.field.check input { width: auto; }
+label.field.check span { margin: 0; color: var(--text); font-size: 13px; }
+
+.sidebar-foot .foot-row { display: flex; gap: 12px; margin-top: 8px; }
+.day-row { display: flex; gap: 10px; font-size: 12px; }
+.day-row span:first-child { min-width: 88px; }
+
+.term-head { margin-bottom: 8px; }
+.term-head .spacer, .page-head .spacer, .actions .spacer { flex: 1; }
+.copy-box + .copy-box { margin-top: 6px; }
+textarea { width: 100%; resize: vertical; font-size: 13px; }

@@ -49,6 +49,10 @@ type Config struct {
 	Interval int `json:"interval_sec"`
 	History  int `json:"history_sec"`
 
+	// PublicIPLookup makes the agent query a public "what is my IP" service
+	// once after start so the panel can show the node's public address.
+	PublicIPLookup bool `json:"public_ip_lookup"`
+
 	// statePath is where the config was loaded from (not serialised).
 	statePath string
 }
@@ -86,7 +90,7 @@ func LoadConfig(path string, args []string) (*Config, error) {
 	cfgFlag := fs.String("config", path, "配置文件路径")
 	localPort := fs.Int("tunnel-local-port", c.Tunnel.LocalPort, "cloudflared 转发的本地端口 (port=0 时使用)")
 	port := fs.Int("port", c.Port, "监听端口 (0 = 仅内网穿透)")
-	bind := fs.String("bind", c.Bind, "监听地址")
+	bindFlag := fs.String("bind", c.Bind, "监听地址，127.0.0.1 = 只允许本机/SSH 隧道访问")
 	token := fs.String("token", "", "面板访问令牌 (留空则使用配置中的)")
 	sshPass := fs.String("ssh-password", c.SSHPassword, "SSH 密码 (供面板内的终端使用)")
 	sshUser := fs.String("ssh-user", c.SSHUser, "SSH 用户名")
@@ -96,6 +100,7 @@ func LoadConfig(path string, args []string) (*Config, error) {
 	tunnelMode := fs.String("tunnel-mode", c.Tunnel.Mode, "穿透模式: quick|token")
 	tunnelToken := fs.String("tunnel-token", c.Tunnel.Token, "cloudflared token (token 模式)")
 	tunnelName := fs.String("tunnel-name", c.Tunnel.Name, "隧道名称 (仅用于展示)")
+	publicIP := fs.Bool("public-ip-lookup", c.PublicIPLookup, "启动时查询一次公网 IP（会访问外网接口）")
 	interval := fs.Int("interval", c.Interval, "采样间隔(秒)")
 	history := fs.Int("history", c.History, "本地保留的历史时长(秒)")
 	genToken := fs.Bool("gen-token", false, "生成随机令牌并写入配置文件后退出")
@@ -109,7 +114,7 @@ func LoadConfig(path string, args []string) (*Config, error) {
 	}
 
 	c.Port = *port
-	c.Bind = *bind
+	c.Bind = *bindFlag
 	c.SSHUser = *sshUser
 	c.SSHPort = *sshPort
 	if *sshPass != "" {
@@ -126,6 +131,7 @@ func LoadConfig(path string, args []string) (*Config, error) {
 	c.Tunnel.Name = *tunnelName
 	c.Interval = *interval
 	c.History = *history
+	c.PublicIPLookup = *publicIP
 
 	if v := os.Getenv("NODEMGR_PORT"); v != "" && *port == c.Port {
 		if p, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {

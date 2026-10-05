@@ -56,6 +56,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/todos/", s.auth(s.handleTodo))
 	mux.HandleFunc("/api/settings", s.auth(s.handleSettings))
 	mux.HandleFunc("/api/probe", s.auth(s.handleProbe))
+	mux.HandleFunc("/api/ssh-test", s.auth(s.handleSSHTest))
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		shared.JSON(w, 200, map[string]any{"ok": true, "version": s.Version, "nodes": len(s.Store.ListNodes())})
 	})
@@ -485,9 +486,23 @@ func applyNodePatch(node *store.Node, in map[string]any) {
 	if v, ok := num("interval"); ok && v >= 2 {
 		node.Interval = v
 	}
+	if v, ok := in["expires_at"]; ok {
+		switch t := v.(type) {
+		case float64:
+			node.ExpiresAt = int64(t)
+		case string:
+			if ts, err := strconv.ParseInt(t, 10, 64); err == nil {
+				node.ExpiresAt = ts
+			}
+		}
+	}
+	if v, ok := str("agent_addr"); ok {
+		node.AgentAddr = v
+	}
 	if v, ok := boolean("enabled"); ok {
 		node.Enabled = v
 	}
+	// 「记住密码」关闭时立刻清掉本机保存的密码。
 	if !node.Remember {
 		node.SSHPass = ""
 	}
@@ -510,7 +525,7 @@ func (s *Server) proxyAgentJSON(w http.ResponseWriter, r *http.Request, n *store
 	}
 	req.Header.Set("Authorization", "Bearer "+n.Token)
 	req.Header.Set("User-Agent", "nodepanel-panel/"+shared.Version)
-	resp, err := s.Poller.hc.Do(req)
+	resp, err := s.Poller.clientFor(reqCtx, n).Do(req)
 	if err != nil {
 		shared.Error(w, 502, "节点不可达: %v", err)
 		return
@@ -650,6 +665,41 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleSSHTest verifies SSH credentials (and the agent channel in SSH-tunnel
+// mode) without saving anything, so the UI can offer a "test connection" button.
+func (s *Server) handleSSHTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		shared.Error(w, 405, "仅支持 POST")
+		return
+	}
+	var in store.Node
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		shared.Error(w, 400, "请求格式错误: %v", err)
+		return
+	}
+	if strings.TrimSpace(in.Host) == "" {
+		shared.Error(w, 400, "请填写 IP 或域名")
+		return
+	}
+	if in.SSHPort == 0 {
+		in.SSHPort = 22
+	}
+	if in.SSHUser == "" {
+		in.SSHUser = "root"
+	}
+	if in.Port == 0 {
+		in.Port = 8899
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	detail, err := s.Poller.TestSSH(ctx, &in, in.SSHPass)
+	if err != nil {
+		shared.Error(w, 502, "%v", err)
+		return
+	}
+	shared.JSON(w, 200, map[string]any{"ok": true, "detail": detail})
+}
+
 // handleProbe lets the panel check a URL from its own network position.
 func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("url")
@@ -760,10 +810,16 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = "index.html"
 	}
-	if strings.HasPrefix(path, "vendor/") || strings.HasSuffix(path, ".svg") ||
-		strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".ico") {
-		// long cache for vendored assets
-		w.Header().Set("Cache-Control", "public, max-age=86400")
+	switch {
+	case strings.HasPrefix(path, "vendor/") || strings.HasSuffix(path, ".svg") ||
+		strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".ico"):
+		// 第三方/静态资源：可以长缓存（升级面板时文件名不变，因此仍带 ETag 校验）
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+	default:
+		// 面板自身的前端代码必须每次校验，否则升级后浏览器会一直跑旧版本。
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
 	}
 	f, err := s.Assets.Open(path)
 	if err != nil {

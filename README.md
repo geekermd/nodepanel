@@ -49,9 +49,30 @@ SSH 网页终端（支持密码）、服务器备注与 TODO LIST。
 | 网络 | 上下行速率、包速率、错误/丢包 |
 | TCP | 已建立连接、监听端口、TIME_WAIT |
 | 进程 | Top 进程（CPU / 内存 / 线程 / 命令行） |
-| 系统信息 | 主机名、发行版、内核、CPU 型号、虚拟化、运行时长、Agent 版本 |
+| 系统信息 | 主机名、**内网 IP / 公网 IP / 网卡 MAC**、发行版、内核、CPU 型号、虚拟化、运行时长、Agent 版本 |
 
 历史曲线：1 小时 / 6 小时 / 24 小时 / 7 天可切换；面板本地保存，节点端只保留最近 5 分钟。
+
+### 物理地址（机房认机器用）
+
+每个节点都会上报并展示：
+
+| 字段 | 来源 | 说明 |
+| --- | --- | --- |
+| 主机名 | `hostname` | 服务器自己的主机名 |
+| 内网 IP | 默认路由网卡（`/proc/net/route` + 网卡地址） | 例如 `192.168.1.10`，同时显示网卡名（如 `eth0` / `ens18`） |
+| 公网 IP | agent 出站探测（可选）或**面板观测到的来源 IP** | 内网穿透/NAT 场景下面板看到的才是真公网地址 |
+| 网卡 MAC | 各物理网卡（自动过滤网桥 / veth / 容器虚拟网卡） | 多张网卡时逗号分隔 |
+
+展示位置：概览卡片底部一行、节点列表的节点列、节点详情页头部以及「系统信息」表。
+
+绑定内网地址时也想看到公网 IP，可以在安装/启动时打开出站探测（**默认关闭**，
+只有这个开关会让 agent 主动访问外网接口）：
+
+```bash
+sudo ./nodemgr-agent install -port 8899 -password 'root密码' -public-ip-lookup
+# 或改配置文件后重启
+```
 
 ### 访问量统计
 
@@ -62,6 +83,9 @@ SSH 网页终端（支持密码）、服务器备注与 TODO LIST。
 
 ### 管理与协作
 
+- **机构到期时间**：每个节点可设到期时间（留空 = 永久）；概览卡片、节点列表、详情页都会显示，
+  30 天内变黄、7 天内变红，过期显示「已过期」，并可配合待办做续费提醒。
+- **多语言界面**：内置中文 / English 双语（登录页、侧边栏、设置页均可一键切换，自动记忆）。
 - **TODO LIST**：全局待办 + 每条待办可关联到某个服务器，支持重要标记、完成勾选。
 - **服务器备注**：每个节点可写用途、到期日、注意事项，直接显示在概览卡片上。
 - **分组**：给节点打分组标签，列表按分组排序。
@@ -101,6 +125,23 @@ chmod +x nodemgr-panel
 ./nodemgr-panel -set-password 新密码        # 修改面板密码后退出
 ```
 
+> 没有 root 权限？可以用用户级 systemd 服务安装（面板读 `/proc` 不需要 root）：
+>
+> ```bash
+> install -m 0755 nodemgr-panel ~/.local/bin/
+> cat > ~/.config/systemd/user/nodemgr-panel.service <<'EOF'
+> [Unit]
+> Description=nodepanel
+> [Service]
+> ExecStart=%h/.local/bin/nodemgr-panel -listen 0.0.0.0:8787 -home %h/.nodepanel
+> Restart=always
+> [Install]
+> WantedBy=default.target
+> EOF
+> systemctl --user enable --now nodemgr-panel
+> ```
+> 仓库里的 `scripts/install-local.sh` 就是这套流程（有 sudo 时还可顺手装成本机节点端）。
+
 ### 2. 服务器端（节点）
 
 把 `nodemgr-agent` 传到服务器，然后：
@@ -127,9 +168,19 @@ sudo ./nodemgr-agent install -port 8899 -password '你的root密码'
 
 | 接入方式 | 填写 | 适用 |
 | --- | --- | --- |
+| **SSH 隧道** | 服务器 IP + SSH 端口 + 密码，agent 端口填 `8899` | **推荐**：云服务器只开放了 SSH 时，面板通过 SSH `direct-tcpip` 通道采集，agent 只监听 `127.0.0.1`，不需要任何额外端口 |
 | IP/域名 + 端口 | `1.2.3.4` / `web.example.com`，端口 `8899` | agent 端口可直接访问 |
 | 域名反向代理 | `panel.example.com`，端口留空 | 用 Nginx/CDN 反代到 agent（建议 https） |
-| cloudflared 内网穿透 | `xxxx.trycloudflare.com`，端口留空 | 服务器没有公网端口 |
+| cloudflared 内网穿透 | `xxxx.trycloudflare.com`，端口留空 | 服务器没有公网端口也没有 SSH |
+
+> SSH 隧道模式会按节点复用一条 SSH 连接（带 keepalive，断了自动重连），
+> 并在首次连接时记录主机密钥指纹（trust on first use），指纹变化会直接报错而不是静默继续。
+
+配合 SSH 隧道模式的节点端安装方式（agent 只监听本机）：
+
+```bash
+sudo ./nodemgr-agent install -port 8899 -bind 127.0.0.1 -password 'root密码'
+```
 
 ---
 
@@ -161,6 +212,7 @@ sudo ./nodemgr-agent install -password 'root密码' \
 | `-tunnel` | 关 | 启用 cloudflared |
 | `-tunnel-mode` | `quick` | `quick`（临时域名）/ `token`（自有域名） |
 | `-interval` | `2` | 采样间隔（秒） |
+| `-public-ip-lookup` | 关 | 启动时查询一次公网 IP（会访问 api.ipify.org 等） |
 | `-history` | `300` | 节点端内存里保留的历史秒数 |
 
 安装后的服务管理：
@@ -288,7 +340,7 @@ SSH 密码走的是加密的 WebSocket（面板 ↔ agent）通道。
 | --- | --- | --- |
 | GET | `/healthz` | 存活检查（免鉴权） |
 | GET | `/api/v1/ping` | 版本、主机名、采样间隔 |
-| GET | `/api/v1/stats` | 主机信息、内存、磁盘、TCP、累计流量、隧道状态、访问计数 |
+| GET | `/api/v1/stats` | 主机信息（含 `private_ip` / `public_ip` / `macs` / `iface`）、内存、磁盘、TCP、累计流量、隧道状态、访问计数 |
 | GET | `/api/v1/metrics?since=<ms>` | 增量时间序列（列式 JSON，只回传新采样点） |
 | GET | `/api/v1/processes?n=30` | Top 进程 |
 | GET | `/api/v1/ports` | 监听端口 + 端口对应进程 + HTTP 自检 |
@@ -376,7 +428,10 @@ go test ./...
 - SSH 密码仅用于建立 SSH 连接；勾选「记住密码」时明文保存在面板本机数据目录（600 权限），
   不需要就留空。
 - 文件/日志浏览只允许 `/var/log`、`/etc`、`/tmp`、`/var/lib`、`/opt`、`/srv`、`/home` 下的路径，
-  且只执行面板发起的只读命令。
+  且只执行面板发起的只读命令。路径中只要出现 `..` 一律拒绝。
+- **服务器信息不上仓库**：仓库里不含任何真实 IP、端口或密码；`servers*.json`、`.env` 已在
+  `.gitignore` 中忽略。SSH 密码仅保存在你本机的 `~/.nodepanel/panel.json`（600 权限），
+  面板「编辑节点」和「终端」页都可以查看、复制、随时清空。
 
 ---
 
@@ -394,6 +449,10 @@ quick 模式本身如此，长期使用请用 `-tunnel-mode token` 配自有域�
 
 **Q：历史数据存哪里？占多少磁盘？**
 面板数据目录 `~/.nodepanel/series/<节点ID>/`，单个节点 90 天约 10~30 MB（自动降采样）。
+
+**Q：公网 IP 显示不出来？**
+agent 默认不访问外网，所以只有面板能观测到节点来源 IP 时才显示（直连/NAT 场景都有）。
+需要节点自己上报公网 IP 时，用 `-public-ip-lookup` 启动或写进配置 `public_ip_lookup: true`。
 
 **Q：能不能监控 Windows？**
 当前节点端只支持 Linux（读 `/proc`）。Windows 可以只作为面板运行端。

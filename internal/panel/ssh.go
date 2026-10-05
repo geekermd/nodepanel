@@ -70,11 +70,18 @@ func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request, n *store.Node
 		password = n.SSHPass
 	}
 
-	if n.UseRelay {
+	// 链路选择：
+	//   ssh 模式  -> 面板经 SSH 隧道直连（agent 往往只监听 127.0.0.1，中继反而不通）
+	//   use_relay -> 面板无法直连 22 端口时，由 agent 代连它自己的 sshd
+	//   其它      -> 面板直连节点 22 端口
+	switch {
+	case n.Mode == store.ModeSSH:
+		s.directSSH(ws, n, password, hello.Cols, hello.Rows)
+	case n.UseRelay:
 		s.relaySSH(ws, n, password, hello.Cols, hello.Rows)
-		return
+	default:
+		s.directSSH(ws, n, password, hello.Cols, hello.Rows)
 	}
-	s.directSSH(ws, n, password, hello.Cols, hello.Rows)
 }
 
 func mustJSON(v any) []byte {
@@ -124,8 +131,9 @@ func (s *Server) directSSH(ws *websocket.Conn, n *store.Node, password string, c
 	})
 	if err != nil {
 		_ = ws.WriteMessage(websocket.TextMessage, mustJSON(wsMessage{
-			Type:    "error",
-			Payload: "SSH 连接 " + addr + " 失败: " + err.Error() + "\n提示: 若该节点只能通过 cloudflared 访问，请在节点设置中开启「通过 Agent 中继 SSH」。",
+			Type: "error",
+			Payload: "SSH 连接 " + addr + " 失败: " + err.Error() +
+				"\n提示: 若该节点只能通过 cloudflared/内网访问，请在节点设置里改用「通过 Agent 中继 SSH」或「SSH 隧道」接入方式。",
 		}))
 		return
 	}

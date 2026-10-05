@@ -25,6 +25,7 @@ const configDir = "/etc/nodemgr-agent"
 func runInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	port := fs.Int("port", 8899, "监听端口，0 = 仅内网穿透")
+	bind := fs.String("bind", "0.0.0.0", "监听地址，127.0.0.1 = 只允许本机/SSH 隧道访问")
 	password := fs.String("password", "", "面板访问密码（同时作为本机 root 密码用于 SSH 中继）")
 	token := fs.String("token", "", "面板访问令牌（留空则自动生成）")
 	sshUser := fs.String("ssh-user", "root", "SSH 用户名")
@@ -86,6 +87,7 @@ func runInstall(args []string) int {
 	}
 	cfg := agent.DefaultConfig()
 	cfg.Port = *port
+	cfg.Bind = *bind
 	cfg.AdminHash = shared.HashToken(tok)
 	cfg.SSHUser = *sshUser
 	cfg.SSHPort = *sshPort
@@ -150,7 +152,7 @@ WantedBy=multi-user.target
 	fmt.Println("========================================")
 	fmt.Printf("  主机名    : %s\n", host.Hostname)
 	fmt.Printf("  系统      : %s (%s)\n", host.OS, host.Arch)
-	fmt.Printf("  监听端口  : %d\n", *port)
+	fmt.Printf("  监听地址  : %s:%d\n", *bind, *port)
 	fmt.Printf("  访问令牌  : %s\n", tok)
 	fmt.Printf("  管理密码  : %s\n", maskIf(*password, tok))
 	fmt.Printf("  SSH 中继  : %s\n", onOff(*sshPassword != ""))

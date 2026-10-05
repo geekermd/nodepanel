@@ -18,8 +18,11 @@ import (
 	"time"
 )
 
-// Version is the release version of both binaries.
-const Version = "1.0.0"
+// Version is the release version of both binaries. It is a variable so the
+// release build can inject the git tag:
+//
+//	go build -ldflags "-X github.com/geekermd/nodepanel/internal/shared.Version=v1.2.3"
+var Version = "1.0.0"
 
 // RandomToken returns a URL-safe random token of n bytes of entropy.
 func RandomToken(n int) string {

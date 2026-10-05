@@ -39,6 +39,7 @@ type Server struct {
 		at   time.Time
 		data []PortStat
 	}
+	portScanning atomic.Bool
 
 	tunnel *Tunnel
 }
@@ -179,7 +180,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	est, lsn, tw, tot := TCPStats()
 	mem := readMemInfo()
 	out := map[string]any{
-		"host":     s.sampler.host,
+		"host":     s.sampler.Host(),
 		"ungent":   shared.Version,
 		"version":  shared.Version,
 		"uptime":   time.Now().Unix() - s.sampler.host.BootTime,
@@ -287,13 +288,30 @@ func (s *Server) cachedProcesses(n int) []Process {
 }
 
 func (s *Server) handlePorts(w http.ResponseWriter, r *http.Request) {
+	// 端口->进程 的映射要扫 /proc/<pid>/fd，在 2 核小机上可能要好几秒。
+	// 因此这里永远先用缓存秒回，过期时在后台刷新，避免面板等一个慢请求。
 	s.portCache.mu.Lock()
-	if time.Since(s.portCache.at) > 20*time.Second || s.portCache.data == nil {
-		s.portCache.data = ListeningPorts()
-		s.portCache.at = time.Now()
-	}
+	stale := time.Since(s.portCache.at) > 20*time.Second || s.portCache.data == nil
 	data := s.portCache.data
 	s.portCache.mu.Unlock()
+	if stale && !s.portScanning.Swap(true) {
+		go func() {
+			defer s.portScanning.Store(false)
+			list := ListeningPorts()
+			s.portCache.mu.Lock()
+			s.portCache.data = list
+			s.portCache.at = time.Now()
+			s.portCache.mu.Unlock()
+		}()
+	}
+	if data == nil {
+		// 第一次请求：同步扫一次，保证面板打开就有数据。
+		data = ListeningPorts()
+		s.portCache.mu.Lock()
+		s.portCache.data = data
+		s.portCache.at = time.Now()
+		s.portCache.mu.Unlock()
+	}
 
 	type probe struct {
 		Port   int    `json:"port"`
@@ -448,6 +466,16 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.cfg.Port <= 0 {
 		log.Printf("未开放公网端口，仅通过 cloudflared 内网穿透访问")
 	}
+
+	go func() {
+		if !s.cfg.PublicIPLookup {
+			return
+		}
+		if ip := LookupPublicIP(6 * time.Second); ip != "" {
+			s.sampler.SetPublicIP(ip)
+			log.Printf("公网 IP: %s", ip)
+		}
+	}()
 
 	if err := s.tunnel.Start(ctx); err != nil {
 		log.Printf("内网穿透启动失败: %v", err)

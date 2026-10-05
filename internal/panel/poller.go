@@ -23,14 +23,18 @@ import (
 // AgentStats mirrors the agent's /api/v1/stats response.
 type AgentStats struct {
 	Host struct {
-		Hostname string `json:"hostname"`
-		OS       string `json:"os"`
-		Kernel   string `json:"kernel"`
-		Arch     string `json:"arch"`
-		CPUCores int    `json:"cpu_cores"`
-		CPUModel string `json:"cpu_model"`
-		BootTime int64  `json:"boot_time"`
-		Virt     string `json:"virt"`
+		Hostname  string   `json:"hostname"`
+		OS        string   `json:"os"`
+		Kernel    string   `json:"kernel"`
+		Arch      string   `json:"arch"`
+		CPUCores  int      `json:"cpu_cores"`
+		CPUModel  string   `json:"cpu_model"`
+		BootTime  int64    `json:"boot_time"`
+		Virt      string   `json:"virt"`
+		PrivateIP string   `json:"private_ip"`
+		Iface     string   `json:"iface"`
+		PublicIP  string   `json:"public_ip"`
+		MACs      []string `json:"macs"`
 	} `json:"host"`
 	Version  string `json:"version"`
 	Uptime   int64  `json:"uptime"`
@@ -132,6 +136,7 @@ type Runtime struct {
 	Fails     int         `json:"fails"`
 	AgentURL  string      `json:"agent_url"`
 	AgentVer  string      `json:"agent_version"`
+	RemoteIP  string      `json:"remote_ip"` // 面板观测到的来源 IP（通常即公网 IP）
 	Stats     *AgentStats `json:"stats,omitempty"`
 
 	Requests    int64                `json:"requests"` // lifetime (panel side)
@@ -149,16 +154,26 @@ type Poller struct {
 	store *store.Store
 	mu    sync.RWMutex
 	rt    map[string]*Runtime
-	hc    *http.Client
-	stop  chan struct{}
-	once  sync.Once
+
+	// SSH 隧道（mode=ssh 的节点走这里访问 agent）
+	tunnels map[string]*sshTunnel
+	tmu     sync.Mutex
+
+	// 每个节点复用一个 HTTP 客户端，避免在 SSH 上堆积空闲通道
+	clients map[string]*http.Client
+	cmu     sync.Mutex
+	hc      *http.Client
+	stop    chan struct{}
+	once    sync.Once
 }
 
 // NewPoller builds a poller for the given store.
 func NewPoller(st *store.Store) *Poller {
 	p := &Poller{
-		store: st,
-		rt:    map[string]*Runtime{},
+		store:   st,
+		rt:      map[string]*Runtime{},
+		tunnels: map[string]*sshTunnel{},
+		clients: map[string]*http.Client{},
 		hc: &http.Client{
 			Timeout: 12 * time.Second,
 			Transport: &http.Transport{
@@ -177,11 +192,46 @@ func NewPoller(st *store.Store) *Poller {
 	return p
 }
 
+// clientFor returns the HTTP client used to reach a node. Nodes in "ssh" mode
+// are reached through an SSH direct-tcpip tunnel, so the agent never needs a
+// public port — the cloud firewall can keep blocking everything but SSH.
+//
+// The client is cached per node: creating a fresh transport per request leaks
+// SSH channels (each keep-alive holds one) until sshd hits MaxSessions and
+// starts refusing new ones.
+func (p *Poller) clientFor(ctx context.Context, n *store.Node) *http.Client {
+	if n.Mode != store.ModeSSH {
+		return p.hc
+	}
+	p.cmu.Lock()
+	defer p.cmu.Unlock()
+	if c, ok := p.clients[n.ID]; ok {
+		return c
+	}
+	tun := p.tunnelFor(n.ID)
+	tr := &http.Transport{
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 1,
+		IdleConnTimeout:     45 * time.Second,
+		DisableCompression:  false,
+		DialContext: func(dctx context.Context, network, addr string) (net.Conn, error) {
+			return tun.dial(dctx, n, n.SSHPass)
+		},
+	}
+	c := &http.Client{Timeout: 25 * time.Second, Transport: tr}
+	p.clients[n.ID] = c
+	return c
+}
+
 // AgentURL builds the base URL used to reach a node's agent.
 func AgentURL(n *store.Node) string {
 	scheme := n.Scheme
 	if scheme == "" {
 		scheme = "http"
+	}
+	if n.Mode == store.ModeSSH {
+		// 真正的连接由 SSH 隧道接管，这里只需要一个稳定的 URL 占位符。
+		return fmt.Sprintf("http://%s:%d", n.AgentHost(), n.AgentPortOrDefault())
 	}
 	if n.Mode == store.ModeTunnel {
 		// Tunnel addresses carry their own scheme and never a port.
@@ -262,8 +312,9 @@ func (p *Poller) pollOnce(ctx context.Context, n *store.Node) error {
 	if base == "" {
 		return fmt.Errorf("节点未配置地址")
 	}
+	client := p.clientFor(ctx, n)
 	started := time.Now()
-	stats, err := p.fetchStats(ctx, base, n.Token)
+	stats, remoteIP, err := p.fetchStats(ctx, client, base, n.Token)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		p.markFailure(n, base, err)
@@ -271,7 +322,7 @@ func (p *Poller) pollOnce(ctx context.Context, n *store.Node) error {
 	}
 	// Service probes ride along with the stats call, so a poll costs exactly
 	// two small HTTP requests: /stats and /metrics?since=...
-	p.markSuccess(n, base, stats, latency)
+	p.markSuccess(n, base, stats, remoteIP, latency)
 
 	// Incremental series fetch: ask only for what we have not seen yet.
 	ser := p.store.Series(n.ID)
@@ -279,7 +330,7 @@ func (p *Poller) pollOnce(ctx context.Context, n *store.Node) error {
 	if v, ok := ser.Latest(); ok {
 		last = v.T
 	}
-	samples, err := p.fetchSeries(ctx, base, n.Token, last)
+	samples, err := p.fetchSeries(ctx, client, base, n.Token, last)
 	if err == nil && len(samples) > 0 {
 		if err := ser.Append(samples); err != nil {
 			log.Printf("节点 %s 历史写入失败: %v", n.Name, err)
@@ -288,23 +339,23 @@ func (p *Poller) pollOnce(ctx context.Context, n *store.Node) error {
 	return nil
 }
 
-func (p *Poller) fetchStats(ctx context.Context, base, token string) (*AgentStats, error) {
+func (p *Poller) fetchStats(ctx context.Context, client *http.Client, base, token string) (*AgentStats, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", base+"/api/v1/stats", nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "nodepanel-panel/"+shared.Version)
-	resp, err := p.hc.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("连接失败: %w", err)
+		return nil, "", fmt.Errorf("连接失败: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if resp.StatusCode != 200 {
 		var e struct {
@@ -312,15 +363,20 @@ func (p *Poller) fetchStats(ctx context.Context, base, token string) (*AgentStat
 		}
 		_ = json.Unmarshal(body, &e)
 		if e.Error != "" {
-			return nil, fmt.Errorf("agent 返回 %d: %s", resp.StatusCode, e.Error)
+			return nil, "", fmt.Errorf("agent 返回 %d: %s", resp.StatusCode, e.Error)
 		}
-		return nil, fmt.Errorf("agent 返回 HTTP %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("agent 返回 HTTP %d", resp.StatusCode)
 	}
 	var st AgentStats
 	if err := json.Unmarshal(body, &st); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, "", fmt.Errorf("解析响应失败: %w", err)
 	}
-	return &st, nil
+	// 隧道场景下 HTTP 头里可能有 Cloudflare 的原始 IP。
+	remote := shared.ClientIP(req)
+	if v := resp.Header.Get("CF-Connecting-IP"); v != "" {
+		remote = v
+	}
+	return &st, remote, nil
 }
 
 // columnar is the agent's metric payload.
@@ -330,7 +386,7 @@ type columnar struct {
 	Series map[string][]float64 `json:"series"`
 }
 
-func (p *Poller) fetchSeries(ctx context.Context, base, token string, since int64) ([]store.Sample, error) {
+func (p *Poller) fetchSeries(ctx context.Context, client *http.Client, base, token string, since int64) ([]store.Sample, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	u := base + "/api/v1/metrics"
@@ -342,7 +398,7 @@ func (p *Poller) fetchSeries(ctx context.Context, base, token string, since int6
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := p.hc.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -401,7 +457,7 @@ func (p *Poller) markFailure(n *store.Node, base string, err error) {
 	r.UpdatedAt = time.Now().Unix()
 }
 
-func (p *Poller) markSuccess(n *store.Node, base string, stats *AgentStats, latency int64) {
+func (p *Poller) markSuccess(n *store.Node, base string, stats *AgentStats, remoteIP string, latency int64) {
 	now := time.Now()
 	day := now.Format("2006-01-02")
 	p.mu.Lock()
@@ -461,6 +517,7 @@ func (p *Poller) markSuccess(n *store.Node, base string, stats *AgentStats, late
 	r.LatencyMS = latency
 	r.AgentURL = base
 	r.AgentVer = stats.Version
+	r.RemoteIP = remoteIP
 	r.Stats = stats
 	r.Probes = stats.Probes
 	r.ProbeOK = len(stats.Probes) > 0
@@ -491,11 +548,20 @@ func (p *Poller) Snapshot() map[string]*Runtime {
 	return out
 }
 
-// Forget drops the runtime state of a removed node.
+// Forget drops the runtime state of a removed node and closes its tunnel.
 func (p *Poller) Forget(id string) {
 	p.mu.Lock()
 	delete(p.rt, id)
 	p.mu.Unlock()
+	p.cmu.Lock()
+	if c, ok := p.clients[id]; ok {
+		if tr, ok := c.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+		delete(p.clients, id)
+	}
+	p.cmu.Unlock()
+	p.ForgetTunnel(id)
 }
 
 // compactLoop folds history and keeps the disk footprint bounded.
@@ -584,7 +650,7 @@ func (p *Poller) RunCommand(ctx context.Context, n *store.Node, cmd string) (str
 	}
 	req.Header.Set("Authorization", "Bearer "+n.Token)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := p.hc.Do(req)
+	resp, err := p.clientFor(reqCtx, n).Do(req)
 	if err != nil {
 		return "", err
 	}

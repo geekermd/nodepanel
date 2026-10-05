@@ -272,6 +272,25 @@ func (s *Sampler) Tick() Sample {
 	return cpu
 }
 
+// Host returns a copy of the cached host description.
+func (s *Sampler) Host() HostInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.host
+	h.MACs = append([]string(nil), s.host.MACs...)
+	return h
+}
+
+// SetPublicIP records the outbound address discovered after start.
+func (s *Sampler) SetPublicIP(ip string) {
+	if ip == "" {
+		return
+	}
+	s.mu.Lock()
+	s.host.PublicIP = ip
+	s.mu.Unlock()
+}
+
 // worstDiskPct returns the usage percentage of the fullest mounted filesystem.
 func (s *Sampler) worstDiskPct() float64 {
 	worst := 0.0

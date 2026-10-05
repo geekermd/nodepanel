@@ -7,6 +7,10 @@ package agent
 
 import (
 	"bufio"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -368,16 +372,21 @@ func CPUInfoCached() CPUInfo {
 	return cpuInfoVal
 }
 
-// HostInfo is the static description of a node.
+// HostInfo is the static description of a node. It doubles as the panel's
+// "物理地址" block: 内网 IP、出站公网 IP 与各网卡 MAC.
 type HostInfo struct {
-	Hostname string `json:"hostname"`
-	OS       string `json:"os"`
-	Kernel   string `json:"kernel"`
-	Arch     string `json:"arch"`
-	CPUCores int    `json:"cpu_cores"`
-	CPUModel string `json:"cpu_model"`
-	BootTime int64  `json:"boot_time"`
-	Virt     string `json:"virt"`
+	Hostname  string   `json:"hostname"`
+	OS        string   `json:"os"`
+	Kernel    string   `json:"kernel"`
+	Arch      string   `json:"arch"`
+	CPUCores  int      `json:"cpu_cores"`
+	CPUModel  string   `json:"cpu_model"`
+	BootTime  int64    `json:"boot_time"`
+	Virt      string   `json:"virt"`
+	PrivateIP string   `json:"private_ip"` // 默认路由网卡上的地址
+	Iface     string   `json:"iface"`      // 对应的网卡名
+	PublicIP  string   `json:"public_ip"`  // 出站地址（NAT 后即公网 IP）
+	MACs      []string `json:"macs"`       // 各物理网卡 MAC
 }
 
 // HostInfoCached caches the static host description.
@@ -420,7 +429,217 @@ func collectHostInfo() {
 	h.CPUModel = ci.Model
 	h.BootTime = bootTime()
 	h.Virt = virtType()
+	h.PrivateIP, h.Iface, h.PublicIP, h.MACs = detectNetwork()
 	hostInfoVal = h
+}
+
+// ---------------------------------------------------------------------------
+// 网络身份：内网 IP / 出站 IP / MAC
+// ---------------------------------------------------------------------------
+
+var (
+	netOnce      sync.Once
+	netPrivateIP string
+	netIface     string
+	netEgressIP  string
+	netMACs      []string
+	netEgressErr error
+)
+
+func detectNetwork() (privateIP, iface, egressIP string, macs []string) {
+	netOnce.Do(collectNetwork)
+	return netPrivateIP, netIface, netEgressIP, netMACs
+}
+
+func collectNetwork() {
+	ifname, egressIP := egressRoute()
+	netIface = ifname
+	// /proc/net/route 的 Source 字段在默认路由上通常是 0.0.0.0，这种"未知"
+	// 要如实上报：面板会用自己的观测来源 IP 补上（NAT 场景下那才是真公网 IP）。
+	if egressIP == "0.0.0.0" {
+		egressIP = ""
+	}
+	netEgressIP = egressIP
+
+	if ifname != "" {
+		if ifi, err := net.InterfaceByName(ifname); err == nil {
+			if v4 := firstIPv4(ifi); v4 != "" {
+				netPrivateIP = v4
+			}
+			if mac := ifi.HardwareAddr.String(); mac != "" {
+				netMACs = append(netMACs, mac)
+			}
+		}
+	}
+	if netPrivateIP == "" {
+		netPrivateIP = firstNonLoopbackIPv4()
+	}
+
+	// 其余物理网卡的 MAC（跳过虚拟网卡），方便在机房里认机器。
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, ifi := range ifaces {
+			if ifi.Flags&net.FlagLoopback != 0 || len(ifi.HardwareAddr) == 0 {
+				continue
+			}
+			name := strings.ToLower(ifi.Name)
+			if strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "veth") ||
+				strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") ||
+				strings.HasPrefix(name, "vnet") || strings.HasPrefix(name, "tun") ||
+				strings.HasPrefix(name, "tap") || strings.HasPrefix(name, "tailscale") ||
+				strings.HasPrefix(name, "zt") || strings.HasPrefix(name, "wg") {
+				continue
+			}
+			mac := ifi.HardwareAddr.String()
+			if mac == "" || containsStr(netMACs, mac) || isVirtualMAC(mac) {
+				continue
+			}
+			netMACs = append(netMACs, mac)
+		}
+	}
+	if len(netMACs) > 4 {
+		netMACs = netMACs[:4]
+	}
+}
+
+// egressRoute reads /proc/net/route to find the interface and source address
+// used for outbound traffic (that is the address the panel sees when NAT is in
+// play).
+func egressRoute() (iface, ip string) {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	first := true
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if first {
+			first = false
+			continue
+		}
+		if len(fields) < 8 || fields[1] != "00000000" {
+			continue // 只关心默认路由
+		}
+		return fields[0], hexIPv4(fields[7])
+	}
+	return "", ""
+}
+
+// hexIPv4 converts the little-endian hex form used by /proc/net/route.
+func hexIPv4(h string) string {
+	if len(h) != 8 {
+		return ""
+	}
+	var b [4]int
+	for i := 0; i < 4; i++ {
+		v := 0
+		for _, c := range h[i*2 : i*2+2] {
+			v <<= 4
+			switch {
+			case c >= '0' && c <= '9':
+				v += int(c - '0')
+			case c >= 'a' && c <= 'f':
+				v += int(c-'a') + 10
+			case c >= 'A' && c <= 'F':
+				v += int(c-'A') + 10
+			default:
+				return ""
+			}
+		}
+		b[i] = v
+	}
+	// /proc/net/route 是小端序
+	return fmt.Sprintf("%d.%d.%d.%d", b[3], b[2], b[1], b[0])
+}
+
+func firstIPv4(ifi *net.Interface) string {
+	if ifi == nil {
+		return ""
+	}
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	return ""
+}
+
+func firstNonLoopbackIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for i := range ifaces {
+		ifi := &ifaces[i]
+		if ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if v4 := firstIPv4(ifi); v4 != "" {
+			return v4
+		}
+	}
+	return ""
+}
+
+// LookupPublicIP asks a public "what is my IP" service for the outbound
+// address. It is opt-in (`-public-ip-lookup`) because it is the only thing the
+// agent ever sends to the internet.
+func LookupPublicIP(timeout time.Duration) string {
+	client := &http.Client{Timeout: timeout}
+	for _, url := range []string{"https://api.ipify.org", "https://ifconfig.me/ip", "https://ipv4.icanhazip.com"} {
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(strings.TrimSpace(string(body)))
+		if ip == nil || ip.IsLoopback() || ip.IsPrivate() {
+			continue
+		}
+		return ip.String()
+	}
+	return ""
+}
+
+// isVirtualMAC filters out locally administered addresses (bit 1 of the first
+// octet), which is how bridges, veth pairs and VM/container NICs identify
+// themselves. What is left is the real hardware address you would read off the
+// machine in a rack.
+func isVirtualMAC(mac string) bool {
+	first := strings.SplitN(mac, ":", 2)[0]
+	v, err := strconv.ParseUint(first, 16, 8)
+	if err != nil {
+		return false
+	}
+	return v&0x02 != 0
+}
+
+func containsStr(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 func bootTime() int64 {

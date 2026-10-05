@@ -16,11 +16,12 @@ import (
 	"github.com/geekermd/nodepanel/internal/shared"
 )
 
-// NodeModes mirror the three ways a node can be reached.
+// NodeModes mirror the ways a node can be reached.
 const (
-	ModeDirect = "direct" // IP/域名 + 端口
+	ModeDirect = "direct" // IP/域名 + 端口（agent 端口可直连）
 	ModeDomain = "domain" // 域名 (80/443, 反向代理)
 	ModeTunnel = "tunnel" // cloudflared 内网穿透地址
+	ModeSSH    = "ssh"    // 通过 SSH 隧道访问 agent（只需 SSH 端口）
 )
 
 // Node is one managed server.
@@ -44,8 +45,32 @@ type Node struct {
 	Interval int      `json:"interval"`  // polling interval, seconds
 	Enabled  bool     `json:"enabled"`
 
+	// ExpiresAt 是服务器到期时间（unix 秒），0 表示永久。
+	ExpiresAt int64 `json:"expires_at"`
+
+	// AgentHost 是 SSH 隧道模式下 agent 监听的主机名（默认 127.0.0.1）。
+	AgentAddr string `json:"agent_addr"`
+	// SSHHostKey 记录首次连接时的主机密钥指纹（trust on first use）。
+	SSHHostKey string `json:"ssh_host_key"`
+
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
+}
+
+// AgentHost 返回 SSH 隧道内部要连接的 agent 地址。
+func (n *Node) AgentHost() string {
+	if strings.TrimSpace(n.AgentAddr) != "" {
+		return strings.TrimSpace(n.AgentAddr)
+	}
+	return "127.0.0.1"
+}
+
+// AgentPortOrDefault 返回 agent 端口，缺省 8899。
+func (n *Node) AgentPortOrDefault() int {
+	if n.Port > 0 {
+		return n.Port
+	}
+	return 8899
 }
 
 // Todo is one checklist entry.
@@ -154,6 +179,9 @@ func Open(dir string) (*Store, error) {
 		}
 		if n.Interval == 0 {
 			n.Interval = s.Settings.PollSeconds
+		}
+		if n.Mode == ModeSSH && n.AgentAddr == "" {
+			n.AgentAddr = "127.0.0.1"
 		}
 	}
 	if err := s.saveLocked(); err != nil {

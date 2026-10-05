@@ -103,9 +103,18 @@ func TestHostInfoDetected(t *testing.T) {
 		t.Fatalf("boot time = %d", h.BootTime)
 	}
 	// 缓存必须返回同一份数据（sync.Once 生效）。
-	if again := HostInfoCached(); again != h {
+	if again := HostInfoCached(); again.Hostname != h.Hostname || again.CPUCores != h.CPUCores ||
+		again.PrivateIP != h.PrivateIP || len(again.MACs) != len(h.MACs) {
 		t.Fatalf("cache changed: %+v vs %+v", again, h)
 	}
+	// 物理地址信息：至少要有内网 IP；公网 IP 允许为空（离线/无默认路由）。
+	if h.PrivateIP == "" {
+		t.Fatalf("private ip not detected: %+v", h)
+	}
+	if h.Iface == "" {
+		t.Fatalf("egress interface not detected: %+v", h)
+	}
+	t.Logf("网络身份: iface=%s private=%s egress=%s macs=%v", h.Iface, h.PrivateIP, h.PublicIP, h.MACs)
 }
 
 func TestMountsAndPorts(t *testing.T) {
