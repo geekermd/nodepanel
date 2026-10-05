@@ -1,0 +1,16 @@
+# 编译产物
+/dist/
+*.exe
+nodemgr-panel
+nodemgr-agent
+
+# 本地运行数据
+.dev-panel/
+*.log
+cookies.txt
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

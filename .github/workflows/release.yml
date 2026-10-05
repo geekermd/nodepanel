@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: 测试
+        run: go test ./... -count=1
+
+      - name: 安装前端依赖检查（无外链，无需 npm）
+        run: |
+          test -f cmd/panel/web/index.html
+          test -f cmd/panel/web/vendor/xterm.js
+
+      - name: 编译
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: ./scripts/build.sh
+
+      - name: 校验和
+        run: cd dist && sha256sum nodemgr-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: 上传产物
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: |
+            dist/nodemgr-*
+            dist/SHA256SUMS
+          generate_release_notes: true
+
+      - name: 保存 workflow 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodepanel-${{ github.ref_name }}
+          path: |
+            dist/nodemgr-*
+            dist/SHA256SUMS
