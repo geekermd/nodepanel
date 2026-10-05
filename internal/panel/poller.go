@@ -518,10 +518,30 @@ func (p *Poller) markSuccess(n *store.Node, base string, stats *AgentStats, remo
 	r.AgentURL = base
 	r.AgentVer = stats.Version
 	r.RemoteIP = remoteIP
+	if ip := usableRemoteIP(remoteIP, n); ip != "" {
+		r.RemoteIP = ip
+	}
 	r.Stats = stats
 	r.Probes = stats.Probes
 	r.ProbeOK = len(stats.Probes) > 0
 	r.UpdatedAt = now.Unix()
+}
+
+// usableRemoteIP 在"面板观测到的来源 IP"没有意义时（SSH 隧道/本机回环），
+// 回退到节点自身的接入地址，保证界面上始终有一个可用的公网 IP。
+func usableRemoteIP(remote string, n *store.Node) string {
+	ip := net.ParseIP(strings.TrimSpace(remote))
+	if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+		return ip.String()
+	}
+	host := shared.NormalizeHost(n.Host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if parsed := net.ParseIP(host); parsed != nil && !parsed.IsLoopback() && !parsed.IsUnspecified() {
+		return parsed.String()
+	}
+	return ""
 }
 
 // Runtime returns the live state for a node.
