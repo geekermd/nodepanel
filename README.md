@@ -405,16 +405,22 @@ nodepanel/
 git clone https://github.com/geekermd/nodepanel.git
 cd nodepanel
 
-# 本机
-go build -o dist/nodemgr-panel ./cmd/panel
-go build -o dist/nodemgr-agent ./cmd/agent
+make build         # 本机：dist/nodemgr-panel + dist/nodemgr-agent
+./scripts/build.sh # 全平台：Linux(amd64/arm64/armv7/386) + macOS + Windows(面板端)
+make test          # 单元测试 + SSH 链路端到端测试
 
-# 全平台（amd64 / arm64 / armv7 / 386）
-./scripts/build.sh
-
-# 测试
-go test ./...
+# 发布（打标签 + 编译 + 上传 GitHub Release）
+./scripts/release.sh v1.0.0
 ```
+
+也可以直接从 [Releases](https://github.com/geekermd/nodepanel/releases) 下载预编译二进制：
+
+| 文件 | 用途 |
+| --- | --- |
+| `nodemgr-panel_v1.0.0_linux_amd64` | 面板端（Linux） |
+| `nodemgr-panel_v1.0.0_darwin_arm64` / `_darwin_amd64` | 面板端（Apple Silicon / Intel Mac） |
+| `nodemgr-panel_v1.0.0_windows_amd64.exe` | 面板端（Windows） |
+| `nodemgr-agent_v1.0.0_linux_amd64` / `_arm64` / `_armv7` / `_386` | 节点端（服务器，仅 Linux） |
 
 交叉编译不需要 CGO：`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/agent`。
 
@@ -455,7 +461,8 @@ agent 默认不访问外网，所以只有面板能观测到节点来源 IP 时�
 需要节点自己上报公网 IP 时，用 `-public-ip-lookup` 启动或写进配置 `public_ip_lookup: true`。
 
 **Q：能不能监控 Windows？**
-当前节点端只支持 Linux（读 `/proc`）。Windows 可以只作为面板运行端。
+节点端只支持 Linux（读 `/proc`）。Windows / macOS 可以作为**面板端**运行（有预编译二进制，
+也可以 `go build ./cmd/panel`），并在「接入方式」里用 SSH 隧道或直连去管理 Linux 服务器。
 
 ---
 

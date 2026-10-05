@@ -7,6 +7,8 @@ ROOT=$(pwd)
 OUT=${OUT:-$ROOT/dist}
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}
 
+# 默认：Linux 全平台 + macOS/Windows 的面板端（节点端仅 Linux，读 /proc）
+# 自定义: TARGETS="linux/amd64 darwin/arm64" ./scripts/build.sh
 TARGETS=${TARGETS:-"linux/amd64 linux/arm64 linux/arm/v7 linux/386 darwin/amd64 darwin/arm64 windows/amd64"}
 LDFLAGS="-s -w -X github.com/geekermd/nodepanel/internal/shared.Version=$VERSION"
 
@@ -20,17 +22,26 @@ for t in $TARGETS; do
   arch=${rest%%/*}
   variant=""
   if [[ "$rest" == */* ]]; then variant=${rest##*/}; fi
-  # 节点端只支持 Linux（读取 /proc）
+  # 节点端只支持 Linux（读取 /proc），面板端各平台都能编译
   bins="nodemgr-panel"
   if [[ "$os" == "linux" ]]; then bins="nodemgr-panel nodemgr-agent"; fi
 
   for bin in $bins; do
     ext=""
     [[ "$os" == "windows" ]] && ext=".exe"
-    name="${bin}_${VERSION}_${os}_${arch}${variant:+v$variant}${ext}"
+    # v7 -> _armv7，避免出现 armvv7
+    suffix=""
+    [[ -n "$variant" ]] && suffix="_${arch}${variant}"
+    [[ -z "$suffix" ]] && suffix="_${arch}"
+    name="${bin}_${VERSION}_${os}${suffix}${ext}"
     echo "--> $name"
-    CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOARM=${variant:-} \
-      go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/$name" "./cmd/${bin#nodemgr-}"
+    if [[ -n "$variant" ]]; then
+      CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOARM=${variant#v} \
+        go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/$name" "./cmd/${bin#nodemgr-}"
+    else
+      CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
+        go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/$name" "./cmd/${bin#nodemgr-}"
+    fi
   done
 done
 

@@ -1,5 +1,3 @@
-//go:build linux
-
 // Command nodemgr-panel is the local management panel. It runs on your own
 // machine (or wherever you keep the browser), polls every configured node over
 // HTTP and keeps the history locally, so the nodes themselves stay tiny.
